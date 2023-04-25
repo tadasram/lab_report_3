@@ -1,0 +1,171 @@
+//Symbol Recognition Code
+#include <stdio.h>
+#include <iostream>
+#include "opencv_aee.hpp"
+#include "main.hpp"
+#include "pi2c.h"
+
+using namespace std;
+
+void setup(void)
+{
+    setupCamera(320, 240);  // Enablig the camera for OpenCV
+}
+
+int main( int argc, char** argv )
+{
+    setup();
+    cv::namedWindow("Photo");   // Creating a GUI window
+
+    while(true)    // Main loop to perform image processing
+    {
+        Mat frame;
+
+        // Capturing a frame from the camera and storing it in a new matrix variable
+        while(frame.empty())
+        {
+        frame = captureFrame();
+        }
+
+        // Flipping image
+        cv::flip(frame,frame,0);
+        cv::flip(frame,frame,1);
+        cv::imshow("Photo", frame); // Displaying the image in the window
+		
+        Mat framecopy = frame.clone(); // Creating a copy of the input frame
+        Mat image;
+		
+        cvtColor(frame, image, COLOR_BGR2HSV);  // Converting image to HSV
+
+        // Defining the color range to select pink objects in the image
+        Scalar lower_range = Scalar(145,30,30);
+        Scalar upper_range = Scalar(165,245,245);
+
+        // Creating a binary mask with the pink colour range
+        Mat pink_mask;
+        inRange(image, lower_range, upper_range, pink_mask);	        
+
+         std::vector<std::vector<Point>> img_symbol_contours;
+		 Mat CDisp = frame;
+	     findContours(pink_mask,img_symbol_contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE); // Finding contours in masked image
+	
+	     // Drawing contours
+	     drawContours(CDisp, img_symbol_contours, -1, Scalar(0, 0, 255), 2);
+	
+	        std::vector<Point2f> corners;
+	        for (int i = 0; i < img_symbol_contours.size(); i++)
+	        {
+	            if (img_symbol_contours[i].size() > 4)
+	            {
+	                approxPolyDP(img_symbol_contours[i], corners, arcLength(img_symbol_contours[i], true) * 0.02, true);
+	                if (corners.size() == 4)
+	                {
+	                    // Drawing the contours on quadrangle
+	                    drawContours(frame, img_symbol_contours, i, Scalar(0, 255, 0), 2);
+	                   
+	                    for (int j = 0; j < corners.size(); j++)
+	                    {
+	                        circle(frame, corners[j], 5, Scalar(0, 0, 255), 2);
+	                    }
+	                }
+	            }
+	        }
+	
+	        // Checking if there are 4 corners
+	        if (corners.size() == 4)
+	        {
+	            // Changing the perspective so that the 4 corners found are the new corners
+	            Mat perspective_transform = getPerspectiveTransform(corners, std::vector<Point2f>{Point2f(0, 0), Point2f(0, 100), Point2f(100, 100), Point2f(100, 0)});
+	            warpPerspective(pink_mask, pink_mask, perspective_transform, Size(100, 100));
+	            // Scaling up the image to 350x350
+	            resize(pink_mask, pink_mask, Size(350, 350));
+				
+	            // Finding the contours of the image
+	            std::vector<std::vector<Point>> image_symbol_contours;
+	            findContours(pink_mask, image_symbol_contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+	            drawContours(pink_mask, image_symbol_contours, -1, Scalar(255, 255, 255), 2);
+	
+	            // Making a 13 item array of Mat objects to store digital symbols
+	            Mat symbols[13];
+	            symbols[0] = imread("Circle.png");
+	            symbols[1] = imread("Star.png");
+	            // Symbols 1-4 are the same image but roated 90 degrees
+	            rotate(symbols[1], symbols[2], ROTATE_90_CLOCKWISE);
+	            rotate(symbols[1], symbols[3], ROTATE_180);
+	            rotate(symbols[1], symbols[4], ROTATE_90_COUNTERCLOCKWISE);
+	            symbols[5] = imread("Triangle.png");
+				// Symbols 5-8 are the same image but roated 90 degrees
+	            rotate(symbols[5], symbols[6], ROTATE_90_CLOCKWISE);
+	            rotate(symbols[5], symbols[7], ROTATE_180);
+	            rotate(symbols[5], symbols[8], ROTATE_90_COUNTERCLOCKWISE);
+	            symbols[9] = imread("Umbrella.png");
+				// Symbols 9-12 are the same image but roated 90 degrees
+	            rotate(symbols[9], symbols[10], ROTATE_90_CLOCKWISE);
+	            rotate(symbols[9], symbols[11], ROTATE_180);
+	            rotate(symbols[9], symbols[12], ROTATE_90_COUNTERCLOCKWISE);
+	            String symbol_names[13] = {"Circle", "Star", "Star", "Star", "Star", "Triangle", "Triangle", "Triangle", "Triangle", "Umbrella", "Umbrella", "Umbrella", "Umbrella"};
+	
+	            int similarity[13];
+	
+	            for (int i = 0; i < 13; i++)
+	            {
+	                // Converting the symbols to HSV and aplying mask
+	                cvtColor(symbols[i], symbols[i], COLOR_BGR2HSV);
+	                inRange(symbols[i], Scalar(150, 50, 50), Scalar(180, 255, 255), symbols[i]);
+	
+	                // Finding the contours of the symbols
+	                std::vector<std::vector<Point>> symbol_contours;
+	                findContours(symbols[i], symbol_contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+	
+	                // Drawing the contours
+	                drawContours(symbols[i], symbol_contours, -1, Scalar(255, 255, 255), 2);
+	
+		            Mat result;
+	
+	                // Comparing symbols[i] and pink_mask
+	                compare(pink_mask, symbols[i], result, CMP_EQ);
+	                int pixel_count = countNonZero(result);
+	                pixel_count = (pixel_count / 350.0) * 100;
+	                similarity[i] = pixel_count;
+	            }
+	            // Finding which symbol has the highest similarity
+	            int max = 0;
+	            int max_index = 0;
+	            for (int i = 0; i < 13; i++)
+	            {
+	                if (similarity[i] > max)
+	                {
+	                    max = similarity[i];
+	                    max_index = i;
+	                }
+	            }
+	            // Checking if the percentage is above 75%
+	            if (max > 75)
+	            {
+	                // Displaying the name of the symbol that is most similar
+	                putText(frame, symbol_names[max_index], Point(0, 50), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 255), 2);
+	            }
+	            else
+	            {
+	                // Displaying "Unknown" on the frame
+	                putText(frame, "Unknown", Point(0, 50), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 255), 2);
+	            }
+	        }
+	
+	       cv::imshow("Photo", frame);
+	       imshow("pink", pink_mask);
+		   imshow("contours", CDisp);
+		   imshow("Transformed Image", perspective_transform);
+	`	  
+	
+	        int key = cv::waitKey(1); // Waiting for a keypress (required to update windows)
+	
+	        key = (key == 255) ? -1 : key; // Checking if the ESC key has been pressed
+	        if (key == 27)
+	            break;
+	    }
+	
+	    closeCV(); // Disable the camera and close any windows
+	
+	    return 0;
+	}
