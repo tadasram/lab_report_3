@@ -1,0 +1,160 @@
+#include <stdio.h>
+#include <iostream>
+#include "opencv_aee.hpp"
+#include "main.hpp"
+#include "pi2c.h"
+
+using namespace std;
+
+void setup(void)
+{
+    setupCamera(320, 240);  // Enabling the camera
+}
+
+int main( int argc, char** argv )
+{
+
+    setup();
+    cv::namedWindow("Photo");
+
+    while(true)    // Main loop to perform image processing
+    {
+        Mat frame;
+
+        // Capturing frame from the camera
+        while(frame.empty())
+        {
+        frame = captureFrame();
+        }
+
+        cv::flip(frame,frame,0);
+        cv::flip(frame,frame,1);
+        cv::imshow("Photo", frame);
+
+        Mat colour;
+        cvtColor (frame, colour, COLOR_BGR2HSV);
+        int choice;
+
+               cout << "Select 1 for Black. 2 for Red. 3 for Yellow. 4 for Green. 5 for Blue" << endl;
+               cin >> choice;
+
+               if (choice==1) //Black
+        {
+            Scalar min_Range = Scalar (0,0,0);
+            Scalar max_Range = Scalar (179,255,51);
+        }
+
+               else if (choice==2) //Red
+        {
+            Scalar min_Range = Scalar (160,35,40);
+            Scalar max_Range = Scalar (185,245,245);
+        }
+
+        else if (choice==3) //Yellow
+        {
+            Scalar min_Range = Scalar (20,100,50);
+            Scalar max_Range = Scalar (40,255,255);
+        }
+
+        else if (choice==4) //Green
+        {
+            Scalar min_Range = Scalar (75,55,40);
+            Scalar max_Range = Scalar (95,255,255);
+        }
+
+        else if (choice==5) //Blue
+        {
+            Scalar min_Range = Scalar (97,40,23);
+            Scalar max_Range = Scalar (120,255,250);
+        }
+        else //Default set to black
+        {
+            Scalar min_Range = Scalar (0,0,0);
+            Scalar max_Range = Scalar (179,255,51);
+        }
+
+        inRange(colour, min_Range, max_Range, colour); //isolating particular colour and creating a mask
+
+		// colour mask image is then split into 8 strips
+        Mat L4 = colour (Range(0,150), Range(32, 64));
+        Mat L3 = colour (Range(0,150), Range(64, 96));
+        Mat L2 = colour (Range(0,150), Range(96, 128));
+        Mat L1 = colour (Range(0,150), Range(128, 160));
+        Mat R1 = colour (Range(0,150), Range(160, 192));
+        Mat R2 = colour (Range(0,150), Range(192, 224));
+        Mat R3 = colour (Range(0,150), Range(224, 256));
+        Mat R4 = colour (Range(0,150), Range(256, 288));
+
+		// Weightings used for PID.
+        int l4 = -3.5;
+        int l3 = -2.5;
+        int l2 = -1.5;
+        int l1 = -0.5;
+
+        int r1 = 0.5;
+        int r2 = 1.5;
+        int r3 = 2.5;
+        int r4 = 3.5;
+
+		// Counting non-zero pixels of each strip
+		int l4n = countNonZero(L4);
+        imshow ("L4", L4);
+        int l3n = countNonZero(L3);
+        imshow ("L3", L3);
+        int l2n = countNonZero(L2);
+        imshow ("L2", L2);
+        int l1n = countNonZero(L1);
+        imshow ("L1", L1);
+        int r1n = countNonZero(R1);
+        imshow ("R1", R1);
+        int r2n = countNonZero(R2);
+        imshow ("R2", R2);
+        int r3n = countNonZero(R3);
+        imshow ("R3", R3);
+        int r4n = countNonZero(R4);
+        imshow ("R4", R4);
+
+        int leftMotor_speed, rightMotor_speed, servoAngle;
+        float Kp = 4; //guess by trial and error
+        float Ki = 0; //guess by trial and error
+        float Kd = 6; //guess by trial and error
+        float error, error_old, sum=0, u, den,num;
+
+		//PID calculations
+        error_old = error;
+        num = (l4n*l4+l3n*l3+l2n*l2+l1n*l1+r1n*r1+r2n*r2+r3n*r3+r4n*r4);
+        den = (l4n+l3n+l2n+l1n+r1n+r2n+r3n+r4n);
+
+        if (den != 0) //preventing issue of code making an error when denominator becomes 0
+        {
+         error = num / den;
+        }
+        else{
+        error = num/1;
+        }
+
+        sum = sum + error;
+
+        u=(Kp*error)+(Ki*sum)+(Kd*(error-error_old)); //PID variable calculation
+
+        Pi2c arduino(7); // Creating a new object "arduino" using address "0x07"
+        char receive[16]; // Creating a buffer of char (single bytes) for the data
+
+        // Reading from the Arduino and put the contents into the "receive" char array
+        arduino.i2cRead(receive,16);
+        // Printing out what the Arduino is sending
+        std::cout << "Arduino Says: " << receive << std::endl;
+
+        // Sending a 16 bit integer
+        arduino.i2cWriteArduinoInt(u); // u value transmitted to arduino where the servo angle and motor speed adjustments are made
+
+        int key = cv::waitKey(1);   // Wait 1ms for a keypress (required to update windows)
+
+        key = (key==255) ? -1 : key;    // Check if the ESC key has been pressed
+        if (key == 27)
+            break;
+           }
+
+           closeCV();  // Disable the camera and close any windows
+           return 0;
+}
