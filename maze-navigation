@@ -1,0 +1,415 @@
+//ESP32 code for maze navigation task
+
+The user inputs a sequence of commands using the numpad
+  5 - FORWARDS
+  8 - BACKWARDS
+  9 - RIGHT
+  7 - LEFT
+  * - CLEAR SEQUENCE
+  # - GO (additionally, sequence is cleared)*/
+
+#include <MPU6050_tockn.h>  //library used for IMU
+#include <Wire.h>           //library used for communications
+#include <Keypad.h>         //library used for keypad
+#include <Encoder.h>        //library used for encoders (measuring distance travelled)
+#include <LiquidCrystal.h>
+
+#define I2C_SLAVE_ADDR 0x04  //4 in hexadecimal
+MPU6050 mpu6050(Wire);       //MPU control
+LiquidCrystal lcd(32, 33, 25, 26, 27, 14);
+
+int default_speed = 120;  //motor speed when going straight
+int straight_angle = 75;  //angle of servo when wheels point straight-ahead (change if needed)
+float goal_angle;         //angle that vehicle is to reach at end of turn
+float current_angle;      //angle of vehicle before turn
+float turn_angle = 88;    //angle of a single turn (change if needed)
+int movement_length;      //distance that vehicle is to travel (in cm)
+int increment = 10;       //movement increment in cm (i.e. giving the distance command 4 means car travels 40 cm)
+float ratio=1.07; //encoder count and distance ratio
+
+long timer = 0;          //timer for communications
+int count = 0;           //rotary encoder count
+int oldPosition = -500;  //rotary encoder previous position
+int mnum = -1;           //number of movement in sequence
+int distances[100];      //variable for storing distances of each movement
+
+String inputString;      //variable for storing the sequence of movements
+String distInputString;  //string variable for storing distances of movements (multiple digit number)
+long distInputInt;       //variable for storing distances of movements (multiple digit number)
+
+const int ROW_NUM = 4;     //number of rows on numpad
+const int COLUMN_NUM = 3;  //number of columns on numpad
+
+char keys[ROW_NUM][COLUMN_NUM] = {  //numpad key layout
+  { '1', '2', '3' },
+  { '4', '5', '6' },
+  { '7', '8', '9' },
+  { '*', '0', '#' }
+};
+
+byte pin_rows[ROW_NUM] = { 15, 2, 0, 4 };     //ESP32 pins used for rows of numpad
+byte pin_column[COLUMN_NUM] = { 16, 17, 5 };  //ESP32 pins used for columns of numpad
+
+Keypad keypad = Keypad(makeKeymap(keys), pin_rows, pin_column, ROW_NUM, COLUMN_NUM);  //numpad initialization
+
+void setup() {
+  Serial.begin(9600);
+  char key;
+  inputString.reserve(100);     // maximum number of digits for a number is 100, change if needed
+  distInputString.reserve(10);  //maximum number of digits for a number is 10, change if needed
+  Wire.begin();                 // join i2c bus
+  lcd.begin(16, 2);             //initializing 16x2 lcd screen
+
+  //lcd screen displays boot up message
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(" Q*Bert Says Hi!");
+
+  controls(0, 0, straight_angle);  //vehicle is stationary
+  mpu6050.begin();                 //MPU-9250 initialization
+  mpu6050.calcGyroOffsets();       //calculation of MPU-9250 offsets
+
+  while (1) {
+    //lcd screen displays menu
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("   MAIN MENU");
+    lcd.setCursor(0, 1);
+    lcd.print("1 MOVE, 3 MANUAL");
+
+    key = keypad.waitForKey();  //storing key press
+    if (key == '1')             //if user selects "move" option
+    {
+      //lcd screen displays prompt
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Current sequence");
+      break;
+    } else if (key == '3') {  //if user selects "menu" option
+      do {
+        //lcd screen displays menu
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("5 7 8 9 - MOVE");
+        lcd.setCursor(0, 1);
+        lcd.print("* - UNDO, # - OK");
+      } while (keypad.waitForKey() != '#');  //if user selects "ok" option, return to main menu
+    }
+  }
+}
+
+//sending left motor speed, right motor speed and angle of servo to Arduino Nano
+void controls(int left_motor_speed, int right_motor_speed, int servo_angle) {
+  mpu6050.update();  //MPU-9250 readings updated
+
+  //sending lms, rms and servo angle to Arduino Nano
+  if (millis() - timer > 200) {
+    Wire.beginTransmission(I2C_SLAVE_ADDR);                     //transmit to device #4
+    Wire.write((byte)((left_motor_speed & 0x0000FF00) >> 8));   //first byte of left motor speed value, containing bits 16 to 9
+    Wire.write((byte)(left_motor_speed & 0x000000FF));          //second byte of left motor speed value, containing 8 LSB - bits 8 to 1
+    Wire.write((byte)((right_motor_speed & 0x0000FF00) >> 8));  //first byte of right motor speed value, containing bits 16 to 9
+    Wire.write((byte)(right_motor_speed & 0x000000FF));         //second byte of right motor speed value, containing 8 LSB - bits 8 to 1
+    Wire.write((byte)((servo_angle & 0x0000FF00) >> 8));        //first byte of servo angle value, containing bits 16 to 9
+    Wire.write((byte)(servo_angle & 0x000000FF));               //second byte of servo angle value, containing 8 LSB - bits 8 to 1
+    Wire.endTransmission();                                     //stop transmitting
+    delay(100);
+    timer = millis();
+  }
+}
+
+//retrieving encoder count from Arduino Nano
+float encoder_count() {
+  Wire.requestFrom(I2C_SLAVE_ADDR, 2);  //requesting position value of encoders from Arduino Nano
+  int newPosition = Wire.read();        //encoder position stored
+
+  if (newPosition < oldPosition)  //if position value has decreased, count increases (invert if needed)
+  {
+    oldPosition = newPosition;           //old position updated
+    count += 1;                          //encoder count increases
+  } else if (newPosition > oldPosition)  //if position value has increased, count decreases (invert if needed)
+  {
+    oldPosition = newPosition;  //old position updated
+    count -= 1;                 //encoder count decreases
+  }
+  return count;  //function returns encoder count
+}
+
+void loop() {
+  char key = keypad.getKey();  //key press stored
+  char distkey;                //key for inputting distance
+
+
+  if (key >= '0' && key <= '9') {  // if numeric key pressed
+    switch (key) {
+      case '5':  //if "5" key pressed (forwards)
+        {
+          key = 'f';  //key press stored as "f"
+          mnum++;     //number of movements increases
+
+          //lcd screen displays prompt to enter movement distance
+          lcd.clear();
+          lcd.setCursor(0, 0);
+          lcd.print("Forwards for:");
+
+          //loop to input multiple-digit number
+          while (1) {
+            char distkey = keypad.waitForKey();  //key press stored
+            Serial.println(distkey);
+            if (distkey >= '0' && distkey <= '9') {  // only act on numeric keys
+              distInputString += distkey;            // append new character to input string
+
+              //lcd screen displays user input
+              lcd.clear();
+              lcd.setCursor(0, 0);
+              lcd.print("Forwards for:");
+              lcd.setCursor(0, 1);
+              lcd.print(distInputString);
+            } else if (distkey == '#') {                 //if user chooses "ok" option (after entering all digits of number)
+              if (distInputString.length() > 0) {        //checking if user entered a number
+                distInputInt = distInputString.toInt();  //number stored as string converted to int
+                distances[mnum] = distInputInt;          //number stored in "distances" array in space "mnum" (movement number)
+                distInputString = "";                    // clear input
+                break;
+              }
+            } else if (distkey == '*') {  //if user chooses "clear" option
+              distInputString = "";       //input is cleared
+              //lcd screen still prompts user (with input cleared)
+              lcd.clear();
+              lcd.setCursor(0, 0);
+              lcd.print("Forwards for:");
+            }
+          }
+          inputString += key;  //append new character to input string
+                               //Serial.print("Movement number: "); Serial.println(mnum);
+                               //Serial.print("Movement distance: "); Serial.println(distances[mnum]);
+        }
+        break;
+
+        //principles for backwards movement is the same as forwards movement
+      case '8':
+        {
+          key = 'b';  //key press stored as "b"
+          mnum++;     //number of movements increases
+
+          //lcd screen displays prompt to enter movement distance
+          lcd.clear();
+          lcd.setCursor(0, 0);
+          lcd.print("Backwards for:");
+
+          while (1) {
+            char distkey = keypad.waitForKey();
+            Serial.println(distkey);
+            if (distkey >= '0' && distkey <= '9') {  // only act on numeric keys
+              distInputString += distkey;            // append new character to input string
+
+              //lcd screen displays user input
+              lcd.clear();
+              lcd.setCursor(0, 0);
+              lcd.print("Backwards for:");
+              lcd.setCursor(0, 1);
+              lcd.print(distInputString);
+
+            } else if (distkey == '#') {                 //if user chooses "ok" option (after entering all digits of number)
+              if (distInputString.length() > 0) {        //checking if user entered a number
+                distInputInt = distInputString.toInt();  //number stored as string converted to int
+                distances[mnum] = distInputInt;          //number stored in "distances" array in space "mnum" (movement number)
+                distInputString = "";                    // clear input
+                break;
+              }
+            } else if (distkey == '*') {  //if user chooses "clear" option
+              distInputString = "";       //input is cleared
+
+              //lcd screen still prompts user (with input cleared)
+              lcd.clear();
+              lcd.setCursor(0, 0);
+              lcd.print("Backwards for:");
+            }
+          }
+
+          inputString += key;  //append new character to input string
+        }
+        break;
+      case '9':  //if "9" key pressed (right)
+        {
+          key = 'r';           //button '9' on numpad indicates movement right
+          mnum++;              //number of movements increases
+          inputString += key;  //append new character to input string
+        }
+        break;
+      case '7':  //if "7" key pressed (left)
+        {
+          key = 'l';           //button '7' on numpad indicates movement left
+          mnum++;              //number of movements increases
+          inputString += key;  //append new character to input string
+        }
+        break;
+    }
+
+    //lcd screen displays current sequence of commands
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Current sequence:");
+    lcd.setCursor(0, 1);
+    lcd.print(inputString);
+    Serial.println(inputString);
+
+  } else if (key == '#') {           //if hashtag is pressed, sequence of movements is finalized and is executed
+    if (inputString.length() > 0) {  //checking if sequence is not empty
+      inputString += key;            //append new character to input string
+
+      //lcd displays countdown (3 seconds left)
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Q*bert is off in:");
+      lcd.setCursor(0, 1);
+      lcd.print("3");
+      controls(0, 0, straight_angle - 40);
+      delay(1000);
+
+      //lcd displays countdown (2 seconds left)
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Q*bert is off in:");
+      lcd.setCursor(0, 1);
+      lcd.print("32");
+      controls(0, 0, straight_angle + 40);
+      delay(1000);
+
+      //lcd displays countdown (1 second left)
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Q*bert is off in:");
+      lcd.setCursor(0, 1);
+      lcd.print("321");
+      controls(0, 0, straight_angle);
+      delay(1000);
+
+      //lcd indicates start of sequence execution
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("GOOOOOOOOOOO!");
+
+      Serial.print("Final command sequence: ");
+      Serial.println(inputString);
+      Serial.print("No of commands: ");
+      Serial.println(inputString.length());
+      for (int i = 0; i < inputString.length(); i++) {
+        Serial.print("Number: ");
+        Serial.println(i);
+        Serial.print("Distance: ");
+        Serial.println(distances[i]);
+      }
+
+
+      //EXECUTION OF MOVEMENTS
+      for (int i = 0; i < inputString.length(); i++) {
+        movement_length = distances[i]*increment;  //length of current movement
+        count = 0;                       //encoder count reset to zero at end of each movement
+        controls(0, 0, straight_angle);  //vehicle comes to a stop at end of each movement
+        delay(500);                      //0.5 second delay before each movement
+        switch (inputString[i]) {        //each character of the string (i.e. each command in sequence) is identified
+          case 'f':                      //if command is "f", move forwards
+            Serial.println("Going forwards");
+            lcd.clear();
+            controls(default_speed, default_speed, straight_angle);  //sending required control data to motors
+            while (encoder_count() < movement_length*ratio) {              //movement ends when vehicle travels required distance
+
+              //lcd screen indicates vehicle is moving forwards and displays remaining distance to travel
+              lcd.setCursor(0, 0);
+              lcd.print("Going forwards");
+              lcd.setCursor(0, 1);
+              lcd.print("Remaining: ");
+              lcd.print(movement_length - encoder_count()/ratio);
+
+              Serial.println(movement_length - encoder_count()/ratio);
+            }
+            break;
+          case 'b':                             //if command is "b", move backwards
+            Serial.println("Going backwards");  //type of movement is printed
+            lcd.clear();
+            controls(-default_speed, -default_speed, straight_angle);  //sending required control data to motors
+            while (encoder_count() > -movement_length*ratio) {               //movement ends when vehicle travels required distance
+
+              //lcd screen indicates vehicle is moving backwards and displays remaining distance to travel
+              lcd.setCursor(0, 0);
+              lcd.print("Going backwards");
+              lcd.setCursor(0, 1);
+              lcd.print("Remaining: ");
+              lcd.print(movement_length*ratio + encoder_count());
+
+              Serial.println(encoder_count());
+            }
+            break;
+          case 'r':                           //if command is "r", turn right
+            Serial.println("Turning right");  //type of movement is printed
+
+            //lcd screen indicates vehicle is going right
+            lcd.clear();
+            lcd.setCursor(0, 0);
+            lcd.print("Going right");
+
+            mpu6050.update();                           //mpu readings updated
+            current_angle = mpu6050.getAngleZ();        //pre-turn angle is stored
+            controls(145, -220, straight_angle + 35);   //sending required control data to motors
+            goal_angle = current_angle - turn_angle;    //goal angle is calculated
+            while (current_angle >= goal_angle) {       //movement stops when current angle reaches goal angle
+              mpu6050.update();                         //mpu readings updated
+              current_angle = mpu6050.getGyroAngleZ();  //mpu readings updated
+
+              //lcd now also displays remaining turn angle
+              lcd.setCursor(0, 1);
+              lcd.print("Remaining: ");
+              lcd.print(-goal_angle + current_angle);
+            }
+            break;
+
+            //principles for left turn are the same as for right turn
+          case 'l':  //if command is "l", turn left
+            Serial.println("Going left");
+            lcd.clear();
+            lcd.setCursor(0, 0);
+            lcd.print("Going left");
+            lcd.clear();
+            mpu6050.update();
+            current_angle = mpu6050.getAngleZ();
+            controls(-220, 145, straight_angle - 35);
+            goal_angle = current_angle + turn_angle;
+            while (current_angle <= goal_angle) {
+              lcd.setCursor(0, 0);
+              lcd.print("Going left");
+              lcd.setCursor(0, 1);
+              lcd.print("Remaining: ");
+              lcd.print(goal_angle - current_angle);
+              mpu6050.update();  //mpu readings updated
+              current_angle = mpu6050.getGyroAngleZ();
+            }
+            delay(500);
+            controls(0, 0, straight_angle + 35);
+            break;
+          case '#':  //if command is "#", sequence of movements is completed
+            Serial.println("End");
+
+            //lcd displays end of movements message
+            lcd.clear();
+            lcd.setCursor(0, 0);
+            lcd.print("Q*Bert finished!");
+            lcd.setCursor(0, 1);
+            lcd.print("New Command?");
+            mnum=-1;
+            delay(500);
+            controls(0, 0, straight_angle);  //vehicle is made to be stationary
+            delay(2000);
+            inputString = "";  //command sequence cleared
+            break;
+        }
+      }
+    }
+  } else if (key == '*') {  //if command is "*", command sequence is cleared
+    inputString = "";
+    mnum=-1;
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Current sequence:");
+    Serial.println("[Input cleared]");
+  }
+}
