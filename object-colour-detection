@@ -1,0 +1,92 @@
+#include <iostream>
+#include <string>
+#include <opencv2/opencv.hpp>
+
+using namespace std;
+using namespace cv;
+
+int main()
+{
+    string picture = "BlueCar.bmp";
+
+    //loading image
+    Mat image = imread(picture);
+    if (image.empty())
+    {
+        cout << "Image not found" << endl;
+    }
+    else
+    {
+        //displaying original image
+        imshow("Original Image", image);
+
+        //converting image from BGR to HSV
+        Mat image_hsv;
+        cvtColor(image, image_hsv, COLOR_BGR2HSV);
+
+        //defining scalars for red, green, and blue masks
+        Scalar lower_red_1(0, 70, 50);
+        Scalar upper_red_1(10, 255, 255);
+        Scalar lower_red_2(170, 70, 50);
+        Scalar upper_red_2(180, 255, 255);
+
+        Scalar lower_green(36, 50, 70);
+        Scalar upper_green(89, 255, 255);
+
+        Scalar lower_blue(90, 50, 70);
+        Scalar upper_blue(128, 255, 255);
+
+        //creating masks of red, green and blue colours
+        Mat red_mask_1, red_mask_2, red_mask, green_mask, blue_mask;
+        inRange(image_hsv, lower_red_1, upper_red_1, red_mask_1);
+        inRange(image_hsv, lower_red_2, upper_red_2, red_mask_2);
+        red_mask = red_mask_1 | red_mask_2;
+        inRange(image_hsv, lower_green, upper_green, green_mask);
+        inRange(image_hsv, lower_blue, upper_blue, blue_mask);
+
+        imshow("Red Mask", red_mask);
+        imshow("Green Mask", green_mask);
+        imshow("Blue Mask", blue_mask);
+
+        //combining red, green and blue masks into one mask
+        Mat object_mask = red_mask | green_mask | blue_mask;
+        imshow("Mask", object_mask);
+
+        //applying newly created mask to remove background
+        Mat masked_image;
+        image.copyTo(masked_image, object_mask);
+        imshow("Masked Image", masked_image);
+
+        //calculating how much of image is red, how much of image is green and how much of image is blue
+        double red_ratio = cv::countNonZero(red_mask) / (double)(countNonZero(object_mask));
+        double green_ratio = cv::countNonZero(green_mask) / (double)(countNonZero(object_mask));
+        double blue_ratio = cv::countNonZero(blue_mask) / (double)(countNonZero(object_mask));
+
+        //determining colour of object
+        string color;
+        if (red_ratio > blue_ratio && red_ratio > green_ratio)
+        {
+            color = "red";
+        }
+        else if (green_ratio > red_ratio && green_ratio > blue_ratio)
+        {
+            color = "green";
+        }
+        else if (blue_ratio > red_ratio && blue_ratio > green_ratio)
+        {
+            color = "blue";
+        }
+        else
+        {
+            color = "unknown";
+        }
+
+        cout << "Red pixels:   " << fixed << setprecision(3) << red_ratio*100 << "%" << endl;
+        cout << "Green pixels: " << fixed << setprecision(3) << green_ratio*100 << "%" << endl;
+        cout << "Blue pixels:  " << fixed << setprecision(3) << blue_ratio*100 << "%" << endl;
+        cout << "Object color: " << color << endl;
+
+        waitKey(0);
+    }
+    return 0;
+}
